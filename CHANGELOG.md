@@ -2,7 +2,7 @@
 
 All notable changes to the SoulSpeedHarness plugin will be documented in this file.
 
-## [1.0.0] - 2024
+## [1.0.0] - 2025
 
 ### Added
 
@@ -16,15 +16,3 @@ All notable changes to the SoulSpeedHarness plugin will be documented in this fi
 - Event-based performance optimization (EntityMountEvent, EntityDismountEvent)
 - Periodic speed updates every 5 ticks for active riders
 - Automatic modifier cleanup on dismount and player quit
-
-### Fixed
-
-- Happy Ghast entity recognition (now uses EntityType.HAPPY_GHAST instead of instanceof Ghast)
-- Harness detection for all color types
-- Compatibility with both Happy Ghasts and regular Ghasts
-
-### Technical
-
-- Modern Paper API usage (EntityType, NamespacedKey for AttributeModifier)
-- Deprecated API replacements (Registry.ENCHANTMENT, NamespacedKey-based AttributeModifier)
-- Clean code structure with helper methods (isHappyGhast, isHarness)
