@@ -1,0 +1,6 @@
+name: SoulSpeedHarness
+version: 1.0.0
+main: com.soulspeedharness.SoulSpeedHarnessPlugin
+api-version: 1.21
+author: Auto
+description: Allows Soul Speed enchantment on harnesses to make Happy Ghasts faster
