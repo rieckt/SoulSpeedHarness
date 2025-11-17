@@ -2,7 +2,6 @@ package com.soulspeedharness;
 
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
-import org.bukkit.Registry;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.attribute.AttributeModifier;
@@ -16,10 +15,15 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDismountEvent;
 import org.bukkit.event.entity.EntityMountEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.event.inventory.PrepareAnvilEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.AnvilInventory;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.view.AnvilView;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -30,11 +34,21 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     private static final NamespacedKey SOUL_SPEED_MODIFIER_KEY = new NamespacedKey("soulspeedharness",
             "soul_speed_modifier");
 
+    private static final int SPEED_UPDATE_INTERVAL_TICKS = 5;
+    private static final int ANVIL_RESULT_SLOT = 2;
+    private static final int BASE_ENCHANT_COST = 2;
+    private static final int COST_PER_ENCHANTMENT = 1;
+    private static final int MAX_REPAIR_COST = 39;
+    private static final double SOUL_SPEED_BASE_BOOST = 0.40;
+    private static final double SOUL_SPEED_BOOST_PER_LEVEL = 0.40;
+
+    private Enchantment soulSpeedEnchantment;
+
     @Override
     public void onEnable() {
+        initializeSoulSpeedEnchantment();
         getServer().getPluginManager().registerEvents(this, this);
 
-        // Periodically update speed for mounted players
         new BukkitRunnable() {
             @Override
             public void run() {
@@ -47,14 +61,26 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
                     }
                 }
             }
-        }.runTaskTimer(this, 0L, 5L); // Check every 5 ticks (0.25 seconds)
+        }.runTaskTimer(this, 0L, SPEED_UPDATE_INTERVAL_TICKS);
 
         getLogger().info("SoulSpeedHarness has been enabled!");
     }
 
+    /**
+     * Initializes the Soul Speed enchantment reference.
+     * This is cached to avoid repeated lookups during runtime.
+     */
+    private void initializeSoulSpeedEnchantment() {
+        @SuppressWarnings("deprecation")
+        Enchantment enchantment = Enchantment.getByKey(NamespacedKey.minecraft("soul_speed"));
+        if (enchantment == null) {
+            getLogger().warning("Soul Speed enchantment not found! Plugin functionality may be limited.");
+        }
+        this.soulSpeedEnchantment = enchantment;
+    }
+
     @Override
     public void onDisable() {
-        // Clean up all modifiers when plugin disables
         for (Player player : getServer().getOnlinePlayers()) {
             if (player.isInsideVehicle()) {
                 Entity vehicle = player.getVehicle();
@@ -97,6 +123,383 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     }
 
     /**
+     * Handles the PrepareAnvilEvent to allow Soul Speed enchantment to be applied
+     * to harnesses via anvil, even though it's normally only compatible with boots.
+     *
+     * @param event The PrepareAnvilEvent triggered when anvil recipe is prepared
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = false)
+    public void onPrepareAnvil(PrepareAnvilEvent event) {
+        if (soulSpeedEnchantment == null) {
+            return;
+        }
+
+        AnvilInventory inventory = event.getInventory();
+        ItemStack firstItem = inventory.getFirstItem();
+        ItemStack secondItem = inventory.getSecondItem();
+
+        if (!isValidAnvilCombination(firstItem, secondItem)) {
+            return;
+        }
+
+        int soulSpeedLevel = extractSoulSpeedLevel(secondItem);
+        if (soulSpeedLevel <= 0) {
+            return;
+        }
+
+        ItemStack result = createEnchantedHarness(firstItem, secondItem, soulSpeedLevel);
+        if (result != null) {
+            int repairCost = calculateAnvilCost(firstItem, secondItem, result, soulSpeedLevel);
+            setRepairCostOnItem(result, repairCost);
+            event.setResult(result);
+
+            if (event.getView() instanceof AnvilView anvilView) {
+                anvilView.setRepairCost(repairCost);
+            }
+        }
+    }
+
+    /**
+     * Sets the repair cost on the result item meta for persistence.
+     */
+    private void setRepairCostOnItem(ItemStack result, int repairCost) {
+        ItemMeta resultMeta = result.getItemMeta();
+        if (resultMeta instanceof org.bukkit.inventory.meta.Repairable repairable) {
+            repairable.setRepairCost(repairCost);
+            result.setItemMeta(resultMeta);
+        }
+    }
+
+    /**
+     * Checks if the anvil combination is valid (harness + enchanted book).
+     *
+     * @param firstItem  The first item in the anvil
+     * @param secondItem The second item in the anvil
+     * @return true if combination is valid, false otherwise
+     */
+    private boolean isValidAnvilCombination(ItemStack firstItem, ItemStack secondItem) {
+        return firstItem != null
+                && isHarness(firstItem.getType())
+                && secondItem != null
+                && secondItem.getType() == Material.ENCHANTED_BOOK;
+    }
+
+    /**
+     * Extracts the Soul Speed level from an enchanted book.
+     *
+     * @param book The enchanted book item
+     * @return The Soul Speed level, or 0 if not found
+     */
+    private int extractSoulSpeedLevel(ItemStack book) {
+        if (book == null || soulSpeedEnchantment == null) {
+            return 0;
+        }
+
+        ItemMeta bookMeta = book.getItemMeta();
+        if (!(bookMeta instanceof org.bukkit.inventory.meta.EnchantmentStorageMeta storageMeta)) {
+            return 0;
+        }
+
+        return storageMeta.getStoredEnchantLevel(soulSpeedEnchantment);
+    }
+
+    /**
+     * Creates an enchanted harness by combining a harness with an enchanted book.
+     *
+     * @param harness        The original harness item
+     * @param book           The enchanted book containing Soul Speed
+     * @param soulSpeedLevel The Soul Speed level from the book
+     * @return The resulting enchanted harness, or null if creation fails
+     */
+    private ItemStack createEnchantedHarness(ItemStack harness, ItemStack book, int soulSpeedLevel) {
+        if (harness == null || book == null || soulSpeedEnchantment == null) {
+            return null;
+        }
+
+        ItemStack result = harness.clone();
+        ItemMeta resultMeta = result.getItemMeta();
+        if (resultMeta == null) {
+            return null;
+        }
+
+        int currentLevel = resultMeta.getEnchantLevel(soulSpeedEnchantment);
+        int newLevel = Math.max(currentLevel, soulSpeedLevel);
+        resultMeta.addEnchant(soulSpeedEnchantment, newLevel, true);
+
+        if (book.getItemMeta() instanceof org.bukkit.inventory.meta.EnchantmentStorageMeta storageMeta) {
+            copyOtherEnchantments(resultMeta, storageMeta);
+        }
+
+        result.setItemMeta(resultMeta);
+        return result;
+    }
+
+    /**
+     * Calculates the XP cost for applying Soul Speed to a harness via anvil.
+     * The cost is based on:
+     * - Base cost for enchanting (2 levels)
+     * - Soul Speed level cost (1 level per enchantment level)
+     * - Additional enchantments from the book (1 level per enchantment)
+     * - Repair cost from the original harness (if any)
+     *
+     * @param harness        The original harness item
+     * @param book           The enchanted book
+     * @param result         The resulting enchanted harness
+     * @param soulSpeedLevel The Soul Speed level being applied
+     * @return The total repair cost in levels
+     */
+    private int calculateAnvilCost(ItemStack harness, ItemStack book, ItemStack result, int soulSpeedLevel) {
+        int cost = BASE_ENCHANT_COST + soulSpeedLevel;
+        cost += calculateAdditionalEnchantmentCost(book);
+        cost += calculatePreviousRepairCost(harness);
+        return Math.min(cost, MAX_REPAIR_COST);
+    }
+
+    /**
+     * Calculates the cost for additional enchantments from the book.
+     *
+     * @param book The enchanted book
+     * @return The additional cost in levels
+     */
+    private int calculateAdditionalEnchantmentCost(ItemStack book) {
+        if (!(book.getItemMeta() instanceof org.bukkit.inventory.meta.EnchantmentStorageMeta storageMeta)) {
+            return 0;
+        }
+
+        int additionalCost = 0;
+        for (Enchantment enchant : storageMeta.getStoredEnchants().keySet()) {
+            if (enchant != soulSpeedEnchantment && storageMeta.getStoredEnchantLevel(enchant) > 0) {
+                additionalCost += COST_PER_ENCHANTMENT;
+            }
+        }
+        return additionalCost;
+    }
+
+    /**
+     * Calculates the cost from previous repair operations on the harness.
+     *
+     * @param harness The original harness item
+     * @return The previous repair cost contribution
+     */
+    private int calculatePreviousRepairCost(ItemStack harness) {
+        if (harness == null || !harness.hasItemMeta()) {
+            return 0;
+        }
+
+        ItemMeta harnessMeta = harness.getItemMeta();
+        if (!(harnessMeta instanceof org.bukkit.inventory.meta.Repairable repairable)) {
+            return 0;
+        }
+
+        int previousCost = repairable.getRepairCost();
+        return previousCost > 0 ? Math.min(previousCost, MAX_REPAIR_COST) : 0;
+    }
+
+    /**
+     * Copies enchantments from an enchanted book to the result item meta,
+     * excluding Soul Speed which is handled separately.
+     *
+     * @param resultMeta  The target item meta
+     * @param storageMeta The source enchantment storage meta
+     */
+    private void copyOtherEnchantments(ItemMeta resultMeta,
+            org.bukkit.inventory.meta.EnchantmentStorageMeta storageMeta) {
+        for (Enchantment enchant : storageMeta.getStoredEnchants().keySet()) {
+            if (enchant == soulSpeedEnchantment) {
+                continue;
+            }
+
+            int bookLevel = storageMeta.getStoredEnchantLevel(enchant);
+            if (bookLevel <= 0) {
+                continue;
+            }
+
+            int existingLevel = resultMeta.getEnchantLevel(enchant);
+            int finalLevel = Math.max(existingLevel, bookLevel);
+
+            if (finalLevel > 0) {
+                try {
+                    resultMeta.addEnchant(enchant, finalLevel, true);
+                } catch (Exception e) {
+                    getLogger()
+                            .fine("Could not add enchantment " + enchant.getKey() + " to harness: " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Handles clicking on the result slot in an anvil to allow taking harnesses
+     * with Soul Speed, bypassing the default validation that prevents it.
+     *
+     * @param event The InventoryClickEvent triggered when clicking in anvil
+     */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (event.getInventory().getType() != InventoryType.ANVIL) {
+            return;
+        }
+
+        if (event.getSlot() != ANVIL_RESULT_SLOT) {
+            return;
+        }
+
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        AnvilInventory anvil = (AnvilInventory) event.getInventory();
+        ItemStack result = anvil.getResult();
+
+        if (!isValidHarnessResult(result)) {
+            return;
+        }
+
+        event.setCancelled(true);
+        processAnvilResult(event, player, anvil, result);
+    }
+
+    /**
+     * Checks if the result item is a valid harness with Soul Speed.
+     *
+     * @param result The result item to check
+     * @return true if valid, false otherwise
+     */
+    private boolean isValidHarnessResult(ItemStack result) {
+        if (result == null || !isHarness(result.getType())) {
+            return false;
+        }
+
+        int soulSpeedLevel = getSoulSpeedLevel(result);
+        return soulSpeedLevel > 0;
+    }
+
+    /**
+     * Processes the anvil result by giving it to the player and consuming input
+     * items.
+     *
+     * @param event  The inventory click event
+     * @param player The player who clicked
+     * @param anvil  The anvil inventory
+     * @param result The result item to give
+     */
+    private void processAnvilResult(InventoryClickEvent event, Player player,
+            AnvilInventory anvil, ItemStack result) {
+        int repairCost = getRepairCostFromAnvil(event);
+
+        if (repairCost > 0 && !deductPlayerExperience(player, repairCost)) {
+            return;
+        }
+
+        giveItemToPlayer(event, player, result.clone());
+        consumeAnvilInputs(anvil);
+        anvil.setResult(null);
+        player.updateInventory();
+    }
+
+    /**
+     * Gets the repair cost from the anvil view using Paper 1.21+ API.
+     */
+    private int getRepairCostFromAnvil(InventoryClickEvent event) {
+        if (event.getView() instanceof AnvilView anvilView) {
+            return anvilView.getRepairCost();
+        }
+        return 0;
+    }
+
+    /**
+     * Deducts experience from the player if they have enough.
+     *
+     * @param player     The player to deduct experience from
+     * @param repairCost The cost in levels
+     * @return true if experience was deducted, false if player doesn't have enough
+     */
+    private boolean deductPlayerExperience(Player player, int repairCost) {
+        int playerLevel = player.getLevel();
+        if (playerLevel < repairCost) {
+            player.sendMessage("§cDu hast nicht genug Erfahrung! Benötigt: " + repairCost + " Level");
+            return false;
+        }
+
+        player.setLevel(playerLevel - repairCost);
+        return true;
+    }
+
+    /**
+     * Gives an item to the player, either on cursor or in inventory.
+     * Uses deprecated setCursor API as it's required for this use case.
+     *
+     * @param event  The inventory click event
+     * @param player The player to give the item to
+     * @param item   The item to give
+     */
+    @SuppressWarnings("deprecation")
+    private void giveItemToPlayer(InventoryClickEvent event, Player player, ItemStack item) {
+        ItemStack cursor = event.getCursor();
+
+        if (cursor == null || cursor.getType() == Material.AIR) {
+            event.setCursor(item);
+        } else {
+            var remaining = player.getInventory().addItem(item);
+            if (!remaining.isEmpty()) {
+                for (ItemStack dropped : remaining.values()) {
+                    player.getWorld().dropItemNaturally(player.getLocation(), dropped);
+                }
+            }
+        }
+    }
+
+    /**
+     * Consumes the input items from the anvil (decrements amount or removes).
+     *
+     * @param anvil The anvil inventory
+     */
+    private void consumeAnvilInputs(AnvilInventory anvil) {
+        consumeFirstItem(anvil);
+        consumeSecondItem(anvil);
+    }
+
+    /**
+     * Consumes the first item from the anvil.
+     *
+     * @param anvil The anvil inventory
+     */
+    private void consumeFirstItem(AnvilInventory anvil) {
+        ItemStack item = anvil.getFirstItem();
+        if (item == null) {
+            return;
+        }
+
+        if (item.getAmount() > 1) {
+            ItemStack newItem = item.clone();
+            newItem.setAmount(item.getAmount() - 1);
+            anvil.setFirstItem(newItem);
+        } else {
+            anvil.setFirstItem(null);
+        }
+    }
+
+    /**
+     * Consumes the second item from the anvil.
+     *
+     * @param anvil The anvil inventory
+     */
+    private void consumeSecondItem(AnvilInventory anvil) {
+        ItemStack item = anvil.getSecondItem();
+        if (item == null) {
+            return;
+        }
+
+        if (item.getAmount() > 1) {
+            ItemStack newItem = item.clone();
+            newItem.setAmount(item.getAmount() - 1);
+            anvil.setSecondItem(newItem);
+        } else {
+            anvil.setSecondItem(null);
+        }
+    }
+
+    /**
      * Check if an entity is a Happy Ghast (or regular Ghast for compatibility)
      */
     private boolean isHappyGhast(Entity entity) {
@@ -115,8 +518,11 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
         return name.endsWith("_HARNESS");
     }
 
+    /**
+     * Updates the speed of a ghast based on the harness's Soul Speed enchantment.
+     * In Minecraft 1.21+, harnesses are stored in the body equipment slot.
+     */
     private void updateGhastSpeed(LivingEntity ghast, Player player) {
-        // Check if ghast has a harness (saddle) with Soul Speed
         ItemStack harness = getHarness(ghast);
         if (harness == null || !isHarness(harness.getType())) {
             removeSpeedModifier(ghast);
@@ -129,34 +535,38 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
             return;
         }
 
-        // Calculate speed boost: base 0.40 + 0.40 per level above first
-        // Level 1: 0.40 (40%), Level 2: 0.80 (80%), Level 3: 1.20 (120%)
-        double speedBoost = 0.40 + (soulSpeedLevel - 1) * 0.40;
-
-        // Check if sprinting for additional boost
-        // Note: When riding a Ghast, player is always in the air, so we only check
-        // sprinting
-        boolean isSprinting = player.isSprinting();
-        if (isSprinting) {
-            // Sprint boost: same as normal (base 0.40 + 0.40 per level above first)
-            // Level 1: 0.40 (40%), Level 2: 0.80 (80%), Level 3: 1.20 (120%)
-            speedBoost = 0.40 + (soulSpeedLevel - 1) * 0.40;
-        }
-
+        double speedBoost = calculateSpeedBoost(soulSpeedLevel);
         applySpeedModifier(ghast, speedBoost);
     }
 
+    /**
+     * Calculates the speed boost based on Soul Speed level.
+     * Formula: base 0.40 + 0.40 per level above first.
+     * Level 1: 0.40 (40%), Level 2: 0.80 (80%), Level 3: 1.20 (120%)
+     */
+    private double calculateSpeedBoost(int soulSpeedLevel) {
+        return SOUL_SPEED_BASE_BOOST + (soulSpeedLevel - 1) * SOUL_SPEED_BOOST_PER_LEVEL;
+    }
+
+    /**
+     * Gets the harness from an entity's body equipment slot.
+     * In Minecraft 1.21+, harnesses are stored in the body equipment slot.
+     */
     private ItemStack getHarness(LivingEntity entity) {
-        // In Minecraft 1.21+, harnesses are stored in the body equipment slot
-        // For rideable entities like Happy Ghasts, check the body slot
         if (entity.getEquipment() == null) {
             return null;
         }
         return entity.getEquipment().getItem(EquipmentSlot.BODY);
     }
 
+    /**
+     * Gets the Soul Speed enchantment level from an item.
+     *
+     * @param item The item to check
+     * @return The Soul Speed level, or 0 if not found
+     */
     private int getSoulSpeedLevel(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) {
+        if (item == null || !item.hasItemMeta() || soulSpeedEnchantment == null) {
             return 0;
         }
 
@@ -165,27 +575,21 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
             return 0;
         }
 
-        // Check for Soul Speed enchantment using Registry API (replaces deprecated
-        // getByKey)
-        Enchantment soulSpeed = Registry.ENCHANTMENT.get(NamespacedKey.minecraft("soul_speed"));
-        if (soulSpeed == null) {
-            return 0;
-        }
-        return meta.getEnchantLevel(soulSpeed);
+        return meta.getEnchantLevel(soulSpeedEnchantment);
     }
 
+    /**
+     * Applies a speed modifier to an entity using the flying speed attribute.
+     * Uses NamespacedKey instead of deprecated UUID constructor.
+     */
     private void applySpeedModifier(LivingEntity entity, double speedBoost) {
-        // Use flying speed attribute for Happy Ghasts
         AttributeInstance attribute = entity.getAttribute(Attribute.FLYING_SPEED);
         if (attribute == null) {
             return;
         }
 
-        // Remove existing modifier if present
         removeSpeedModifier(entity);
 
-        // Add new modifier with multiply_base operation using NamespacedKey (replaces
-        // deprecated UUID constructor)
         AttributeModifier modifier = new AttributeModifier(
                 SOUL_SPEED_MODIFIER_KEY,
                 speedBoost,
@@ -193,25 +597,26 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
 
         attribute.addModifier(modifier);
 
-        // Mark in PDC that modifier is applied
         PersistentDataContainer pdc = entity.getPersistentDataContainer();
         pdc.set(SOUL_SPEED_MODIFIER_KEY, PersistentDataType.DOUBLE, speedBoost);
     }
 
+    /**
+     * Removes the speed modifier from an entity.
+     * Uses NamespacedKey instead of deprecated UUID method.
+     */
     private void removeSpeedModifier(LivingEntity entity) {
         AttributeInstance attribute = entity.getAttribute(Attribute.FLYING_SPEED);
         if (attribute == null) {
             return;
         }
 
-        // Remove modifier by NamespacedKey (replaces deprecated UUID method)
         try {
             attribute.removeModifier(SOUL_SPEED_MODIFIER_KEY);
         } catch (Exception e) {
-            // Modifier might not exist, ignore
+            // Ignore - modifier might not exist
         }
 
-        // Clear PDC marker
         PersistentDataContainer pdc = entity.getPersistentDataContainer();
         pdc.remove(SOUL_SPEED_MODIFIER_KEY);
     }
