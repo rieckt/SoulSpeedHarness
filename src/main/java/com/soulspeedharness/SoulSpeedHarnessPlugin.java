@@ -44,13 +44,13 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         soulSpeedModifierKey = new NamespacedKey(this, "soul_speed_modifier");
-        
+
         if (!initializeSoulSpeedEnchantment()) {
             getLogger().severe("Soul Speed enchantment not found! Plugin will be disabled.");
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
-        
+
         getServer().getPluginManager().registerEvents(this, this);
 
         new BukkitRunnable() {
@@ -60,7 +60,7 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
                     if (player.isInsideVehicle()) {
                         Entity vehicle = player.getVehicle();
                         if (vehicle != null && isHappyGhast(vehicle)) {
-                            updateGhastSpeed((LivingEntity) vehicle, player);
+                            updateGhastSpeed((LivingEntity) vehicle);
                         }
                     }
                 }
@@ -101,10 +101,10 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityMount(EntityMountEvent event) {
-        if (event.getEntity() instanceof Player player) {
+        if (event.getEntity() instanceof Player) {
             Entity mount = event.getMount();
-            if (mount != null && isHappyGhast(mount)) {
-                updateGhastSpeed((LivingEntity) mount, player);
+            if (isHappyGhast(mount)) {
+                updateGhastSpeed((LivingEntity) mount);
             }
         }
     }
@@ -113,7 +113,7 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     public void onEntityDismount(EntityDismountEvent event) {
         if (event.getEntity() instanceof Player) {
             Entity dismounted = event.getDismounted();
-            if (dismounted != null && isHappyGhast(dismounted)) {
+            if (isHappyGhast(dismounted)) {
                 removeSpeedModifier((LivingEntity) dismounted);
             }
         }
@@ -156,7 +156,7 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
 
         ItemStack result = createEnchantedHarness(firstItem, secondItem, soulSpeedLevel);
         if (result != null) {
-            int repairCost = calculateAnvilCost(firstItem, secondItem, result, soulSpeedLevel);
+            int repairCost = calculateAnvilCost(firstItem, secondItem, soulSpeedLevel);
             setRepairCostOnItem(result, repairCost);
             event.setResult(result);
 
@@ -242,20 +242,17 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * Calculates the XP cost for applying Soul Speed to a harness via anvil.
-     * The cost is based on:
-     * - Base cost for enchanting (2 levels)
-     * - Soul Speed level cost (1 level per enchantment level)
-     * - Additional enchantments from the book (1 level per enchantment)
-     * - Repair cost from the original harness (if any)
+     * Calculates the XP cost for applying Soul Speed to a harness via anvil. The cost is based on:
+     * - Base cost for enchanting (2 levels) - Soul Speed level cost (1 level per enchantment level)
+     * - Additional enchantments from the book (1 level per enchantment) - Repair cost from the
+     * original harness (if any)
      *
-     * @param harness        The original harness item
-     * @param book           The enchanted book
-     * @param result         The resulting enchanted harness
+     * @param harness The original harness item
+     * @param book The enchanted book
      * @param soulSpeedLevel The Soul Speed level being applied
      * @return The total repair cost in levels
      */
-    private int calculateAnvilCost(ItemStack harness, ItemStack book, ItemStack result, int soulSpeedLevel) {
+    private int calculateAnvilCost(ItemStack harness, ItemStack book, int soulSpeedLevel) {
         int cost = BASE_ENCHANT_COST + soulSpeedLevel;
         cost += calculateAdditionalEnchantmentCost(book);
         cost += calculatePreviousRepairCost(harness);
@@ -312,24 +309,20 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     private void copyOtherEnchantments(ItemMeta resultMeta,
             org.bukkit.inventory.meta.EnchantmentStorageMeta storageMeta) {
         for (Enchantment enchant : storageMeta.getStoredEnchants().keySet()) {
-            if (enchant == soulSpeedEnchantment) {
-                continue;
-            }
+            if (enchant != soulSpeedEnchantment) {
+                int bookLevel = storageMeta.getStoredEnchantLevel(enchant);
+                if (bookLevel > 0) {
+                    int existingLevel = resultMeta.getEnchantLevel(enchant);
+                    int finalLevel = Math.max(existingLevel, bookLevel);
 
-            int bookLevel = storageMeta.getStoredEnchantLevel(enchant);
-            if (bookLevel <= 0) {
-                continue;
-            }
-
-            int existingLevel = resultMeta.getEnchantLevel(enchant);
-            int finalLevel = Math.max(existingLevel, bookLevel);
-
-            if (finalLevel > 0) {
-                try {
-                    resultMeta.addEnchant(enchant, finalLevel, true);
-                } catch (Exception e) {
-                    getLogger()
-                            .fine("Could not add enchantment " + enchant.getKey() + " to harness: " + e.getMessage());
+                    if (finalLevel > 0) {
+                        try {
+                            resultMeta.addEnchant(enchant, finalLevel, true);
+                        } catch (Exception e) {
+                            getLogger().fine("Could not add enchantment " + enchant.getKey()
+                                    + " to harness: " + e.getMessage());
+                        }
+                    }
                 }
             }
         }
@@ -398,7 +391,7 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
             return;
         }
 
-        giveItemToPlayer(event, player, result.clone());
+        giveItemToPlayer(player, result.clone());
         consumeAnvilInputs(anvil);
         anvil.setResult(null);
         player.updateInventory();
@@ -433,15 +426,13 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * Gives an item to the player's inventory.
-     * Uses scheduler to safely modify inventory after event cancellation,
-     * avoiding deprecated setCursor API that can cause inconsistencies.
+     * Gives an item to the player's inventory. Uses scheduler to safely modify inventory after
+     * event cancellation, avoiding deprecated setCursor API that can cause inconsistencies.
      *
-     * @param event  The inventory click event
      * @param player The player to give the item to
-     * @param item   The item to give
+     * @param item The item to give
      */
-    private void giveItemToPlayer(InventoryClickEvent event, Player player, ItemStack item) {
+    private void giveItemToPlayer(Player player, ItemStack item) {
         getServer().getScheduler().runTask(this, () -> {
             var remaining = player.getInventory().addItem(item);
             if (!remaining.isEmpty()) {
@@ -533,7 +524,7 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
      * Updates the speed of a ghast based on the harness's Soul Speed enchantment.
      * In Minecraft 1.21+, harnesses are stored in the body equipment slot.
      */
-    private void updateGhastSpeed(LivingEntity ghast, Player player) {
+    private void updateGhastSpeed(LivingEntity ghast) {
         ItemStack harness = getHarness(ghast);
         if (harness == null || !isHarness(harness.getType())) {
             removeSpeedModifier(ghast);
