@@ -24,15 +24,12 @@ import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.view.AnvilView;
-import org.bukkit.persistence.PersistentDataContainer;
-import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 
 public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
 
-    private static final NamespacedKey SOUL_SPEED_MODIFIER_KEY = new NamespacedKey("soulspeedharness",
-            "soul_speed_modifier");
+    private NamespacedKey soulSpeedModifierKey;
 
     private static final int SPEED_UPDATE_INTERVAL_TICKS = 5;
     private static final int ANVIL_RESULT_SLOT = 2;
@@ -46,7 +43,14 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
-        initializeSoulSpeedEnchantment();
+        soulSpeedModifierKey = new NamespacedKey(this, "soul_speed_modifier");
+        
+        if (!initializeSoulSpeedEnchantment()) {
+            getLogger().severe("Soul Speed enchantment not found! Plugin will be disabled.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+        
         getServer().getPluginManager().registerEvents(this, this);
 
         new BukkitRunnable() {
@@ -69,14 +73,17 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     /**
      * Initializes the Soul Speed enchantment reference.
      * This is cached to avoid repeated lookups during runtime.
+     *
+     * @return true if enchantment was found and initialized, false otherwise
      */
-    private void initializeSoulSpeedEnchantment() {
+    private boolean initializeSoulSpeedEnchantment() {
         @SuppressWarnings("deprecation")
         Enchantment enchantment = Enchantment.getByKey(NamespacedKey.minecraft("soul_speed"));
         if (enchantment == null) {
-            getLogger().warning("Soul Speed enchantment not found! Plugin functionality may be limited.");
+            return false;
         }
         this.soulSpeedEnchantment = enchantment;
+        return true;
     }
 
     @Override
@@ -417,7 +424,7 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     private boolean deductPlayerExperience(Player player, int repairCost) {
         int playerLevel = player.getLevel();
         if (playerLevel < repairCost) {
-            player.sendMessage("§cDu hast nicht genug Erfahrung! Benötigt: " + repairCost + " Level");
+            player.sendMessage("§cYou don't have enough experience! Required: " + repairCost + " levels");
             return false;
         }
 
@@ -426,27 +433,24 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * Gives an item to the player, either on cursor or in inventory.
-     * Uses deprecated setCursor API as it's required for this use case.
+     * Gives an item to the player's inventory.
+     * Uses scheduler to safely modify inventory after event cancellation,
+     * avoiding deprecated setCursor API that can cause inconsistencies.
      *
      * @param event  The inventory click event
      * @param player The player to give the item to
      * @param item   The item to give
      */
-    @SuppressWarnings("deprecation")
     private void giveItemToPlayer(InventoryClickEvent event, Player player, ItemStack item) {
-        ItemStack cursor = event.getCursor();
-
-        if (cursor == null || cursor.getType() == Material.AIR) {
-            event.setCursor(item);
-        } else {
+        getServer().getScheduler().runTask(this, () -> {
             var remaining = player.getInventory().addItem(item);
             if (!remaining.isEmpty()) {
                 for (ItemStack dropped : remaining.values()) {
                     player.getWorld().dropItemNaturally(player.getLocation(), dropped);
                 }
             }
-        }
+            player.updateInventory();
+        });
     }
 
     /**
@@ -465,18 +469,7 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
      * @param anvil The anvil inventory
      */
     private void consumeFirstItem(AnvilInventory anvil) {
-        ItemStack item = anvil.getFirstItem();
-        if (item == null) {
-            return;
-        }
-
-        if (item.getAmount() > 1) {
-            ItemStack newItem = item.clone();
-            newItem.setAmount(item.getAmount() - 1);
-            anvil.setFirstItem(newItem);
-        } else {
-            anvil.setFirstItem(null);
-        }
+        consumeAnvilItem(anvil, true);
     }
 
     /**
@@ -485,7 +478,17 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
      * @param anvil The anvil inventory
      */
     private void consumeSecondItem(AnvilInventory anvil) {
-        ItemStack item = anvil.getSecondItem();
+        consumeAnvilItem(anvil, false);
+    }
+
+    /**
+     * Consumes an item from the anvil (first or second slot).
+     *
+     * @param anvil The anvil inventory
+     * @param isFirst true for first slot, false for second slot
+     */
+    private void consumeAnvilItem(AnvilInventory anvil, boolean isFirst) {
+        ItemStack item = isFirst ? anvil.getFirstItem() : anvil.getSecondItem();
         if (item == null) {
             return;
         }
@@ -493,9 +496,17 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
         if (item.getAmount() > 1) {
             ItemStack newItem = item.clone();
             newItem.setAmount(item.getAmount() - 1);
-            anvil.setSecondItem(newItem);
+            if (isFirst) {
+                anvil.setFirstItem(newItem);
+            } else {
+                anvil.setSecondItem(newItem);
+            }
         } else {
-            anvil.setSecondItem(null);
+            if (isFirst) {
+                anvil.setFirstItem(null);
+            } else {
+                anvil.setSecondItem(null);
+            }
         }
     }
 
@@ -591,14 +602,11 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
         removeSpeedModifier(entity);
 
         AttributeModifier modifier = new AttributeModifier(
-                SOUL_SPEED_MODIFIER_KEY,
+                soulSpeedModifierKey,
                 speedBoost,
                 AttributeModifier.Operation.MULTIPLY_SCALAR_1);
 
         attribute.addModifier(modifier);
-
-        PersistentDataContainer pdc = entity.getPersistentDataContainer();
-        pdc.set(SOUL_SPEED_MODIFIER_KEY, PersistentDataType.DOUBLE, speedBoost);
     }
 
     /**
@@ -611,13 +619,6 @@ public class SoulSpeedHarnessPlugin extends JavaPlugin implements Listener {
             return;
         }
 
-        try {
-            attribute.removeModifier(SOUL_SPEED_MODIFIER_KEY);
-        } catch (Exception e) {
-            // Ignore - modifier might not exist
-        }
-
-        PersistentDataContainer pdc = entity.getPersistentDataContainer();
-        pdc.remove(SOUL_SPEED_MODIFIER_KEY);
+        attribute.removeModifier(soulSpeedModifierKey);
     }
 }
